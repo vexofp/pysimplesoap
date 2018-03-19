@@ -31,6 +31,7 @@ from .simplexml import SimpleXMLElement
 import random
 import string
 from hashlib import sha1
+from base64 import b64encode
 
 def randombytes(N):
     return ''.join(random.SystemRandom().choice(string.ascii_uppercase + string.digits) for _ in range(N))
@@ -98,13 +99,16 @@ class UsernameDigestToken(UsernameToken):
         usertoken.add_child('wsu:Created', created, ns=False)
 
         nonce = randombytes(16)
-        wssenonce = usertoken.add_child('wsse:Nonce', nonce.encode('base64')[:-1], ns=False)
+        b64nonce = b64encode(nonce.encode())
+        wssenonce = usertoken.add_child('wsse:Nonce', b64nonce.decode(), ns=False)
         wssenonce['EncodingType'] = Base64Binary_URI
 
         sha1obj = sha1()
-        sha1obj.update(nonce + created + self.password)
+        content = nonce + created + self.password
+        sha1obj.update(content.encode())
         digest = sha1obj.digest()
-        password = usertoken.add_child('wsse:Password', digest.encode('base64')[:-1], ns=False)
+        b64digest = b64encode(digest)
+        password = usertoken.add_child('wsse:Password', b64digest.decode(), ns=False)
         password['Type'] = PasswordDigest_URI
 
 

@@ -330,6 +330,9 @@ class SimpleXMLElement(object):
         # example: types={'p': {'a': int,'b': int}, 'c': [{'d':str}]}
         #   expected xml: <p><a>1</a><b>2</b></p><c><d>hola</d><d>chau</d>
         #   returnde value: {'p': {'a':1,'b':2}, `'c':[{'d':'hola'},{'d':'chau'}]}
+
+        attr_blacklist = ('xsi:type', 'xmlns')
+
         d = {}
         for node in self():
             name = str(node.get_local_name())
@@ -403,10 +406,30 @@ class SimpleXMLElement(object):
                         tmp_dict = {}    # unmarshall each value & mix
                         for child in (node.children() or []):
                             tmp_dict.update(child.unmarshall(fn[0], strict))
+
+                        for aname, avalue in parent.attributes().items():
+                            if aname in attr_blacklist:
+                                continue
+
+                            if aname in fn[0]:
+                                afn = fn[0][aname]
+                            else:
+                                log.warning('Ignoring attribute {} on {}'.format(aname, parent.get_local_name()))
+                                continue
+
+                            afn = TYPE_UNMARSHAL_FN.get(afn, afn)
+                            if afn == str:
+                                afn = unicode
+                            elif afn is None:
+                                afn = lambda x: x
+
+                            tmp_dict[aname] = afn(unicode(avalue))
+
                         value.append(tmp_dict)
                 else:  # len(fn[0]) == 0
                     for child in (children or []):
                         value.append(child.unmarshall(fn[0], strict))
+
 
             elif isinstance(fn, tuple):
                 value = []
@@ -433,7 +456,29 @@ class SimpleXMLElement(object):
                 ##if ref_name_type is not None:
                 ##    fn = fn[ref_name_type]
                 children = node.children()
-                value = children and children.unmarshall(fn, strict)
+
+                value = {}
+                if children:
+                    value.update(children.unmarshall(fn, strict))
+
+                for aname, avalue in node.attributes().items():
+                    if aname in attr_blacklist:
+                        continue
+
+                    if aname in fn:
+                        afn = fn[aname]
+                    else:
+                        log.warning('Ignoring attribute {} on {}'.format(aname, node.get_local_name()))
+                        continue
+
+                    afn = TYPE_UNMARSHAL_FN.get(afn, afn)
+                    if afn == str:
+                        afn = unicode
+                    elif afn is None:
+                        afn = lambda x: x
+
+                    value[aname] = afn(unicode(avalue))
+
             else:
                 if fn is None:  # xsd:anyType not unmarshalled
                     value = node
@@ -452,6 +497,8 @@ class SimpleXMLElement(object):
                 else:
                     value = None
             d[name] = value
+
+
         return d
 
     def _update_ns(self, name):

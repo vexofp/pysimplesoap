@@ -27,6 +27,7 @@ import logging
 import os
 import tempfile
 import warnings
+import collections
 
 from . import __author__, __copyright__, __license__, __version__, TIMEOUT
 from .simplexml import SimpleXMLElement, TYPE_MAP, REVERSE_TYPE_MAP, Struct
@@ -271,8 +272,10 @@ class SoapClient(object):
                 else:
                     detail = repr(detailXml.children())
 
-            raise SoapFault(unicode(response.faultcode),
-                            unicode(response.faultstring),
+            log.warning(self.xml_request)
+            log.error(self.xml_response)
+            raise SoapFault(unicode(response('faultcode', error=False)),
+                            unicode(response('faultstring', error=False)),
                             detail)
 
         # do post-processing using plugins (i.e. WSSE signature verification)
@@ -819,12 +822,11 @@ class SoapClient(object):
         if not services:
             services[''] = {'ports': {'': None}}
    
-        elements = list(e for e in elements.values() if type(e) is type) + sorted(e for e in elements.values() if not(type(e) is type))
-        e = None
         self.elements = []
-        for element in elements:
-            if e!= element: self.elements.append(element)
-            e = element
+        for e in elements.values():
+            if not isinstance(e, collections.Hashable):
+                self.elements += [e]
+        self.elements += set(e for e in elements.values() if isinstance(e, collections.Hashable))
 
         return services
 

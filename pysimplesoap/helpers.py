@@ -12,7 +12,6 @@
 
 """Pythonic simple SOAP Client helpers"""
 
-
 from __future__ import unicode_literals
 import sys
 if sys.version > '3':
@@ -34,7 +33,6 @@ except ImportError:
 
 from . import __author__, __copyright__, __license__, __version__
 
-
 log = logging.getLogger(__name__)
 
 
@@ -54,7 +52,7 @@ def fetch(url, http, cache=False, force_download=False, wsdl_basedir='', headers
                 log.debug('Scheme not found, trying %s' % scheme)
                 return fetch(tmp_url, http, cache, force_download, wsdl_basedir, headers)
             except Exception as e:
-                log.error(e)
+                log.debug(e)
         raise RuntimeError('No scheme given for url: %s' % url)
 
     # make md5 hash of the url for caching...
@@ -109,7 +107,7 @@ def sort_dict(od, d):
 def make_key(element_name, element_type, namespace):
     """Return a suitable key for elements"""
     # only distinguish 'element' vs other types
-    if element_type in ('complexType', 'simpleType'):
+    if element_type in ('complexType', 'simpleType', 'annotation'):
         eltype = 'complexType'
     else:
         eltype = element_type
@@ -126,32 +124,38 @@ def process_element(elements, element_name, node, element_type, xsd_uri,
 
     log.debug('Processing element %s %s' % (element_name, element_type))
 
+    # check if extending a previous processed element ("extension"):
+    new_struct = struct is None
+    if new_struct:
+        key = make_key(element_name, element_type, namespace)
+        struct = Struct(key)
+        struct.namespaces[None] = namespace   # set the default namespace
+        struct.qualified = qualified
+
     # iterate over inner tags of the element definition:
     for tag in node:
+        alias = False
 
         # sanity checks (skip superfluous xml tags, resolve aliases, etc.):
         if tag.get_local_name() in ('annotation', 'documentation'):
             continue
         elif tag.get_local_name() in ('element', 'restriction', 'list'):
-            log.debug('%s has no children! %s' % (element_name, tag))
             children = tag  # element "alias"?
             alias = True
+        elif tag.get_local_name() == 'attribute':
+            children = [tag]
         elif tag.children():
             children = tag.children()
-            alias = False
         else:
             log.debug('%s has no children! %s' % (element_name, tag))
             continue  # TODO: abstract?
 
-        # check if extending a previous processed element ("extension"):
-        new_struct = struct is None
-        if new_struct:
-            struct = Struct()
-            struct.namespaces[None] = namespace   # set the default namespace
-            struct.qualified = qualified
-
         # iterate over the element's components (sub-elements):
+        children = [x for x in children if x.get_local_name() not in ('annotation', 'documentation')]
         for e in children:
+
+            if e['processContents'] == 'lax':
+                continue
 
             # extract type information from xml attributes / children:
             t = e['type']
@@ -240,25 +244,9 @@ def process_element(elements, element_name, node, element_type, xsd_uri,
             if e['maxOccurs'] == 'unbounded' or (uri == soapenc_uri and type_name == 'Array'):
                 # it's an array... TODO: compound arrays? and check ns uri!
                 if isinstance(fn, Struct):
-                    if len(children) > 1 or (dialect in ('jetty', )):
-                        # Jetty style support
-                        # {'ClassName': [{'attr1': val1, 'attr2': val2}]
-                        fn.array = True
-                    else:
-                        # .NET style now matches Jetty style
-                        # {'ClassName': [{'attr1': val1, 'attr2': val2}]
-                        #fn.array = True
-                        #struct.array = True
-                        fn = [fn]
+                    fn = [fn]
                 else:
-                    if len(children) > 1 or dialect in ('jetty',):
-                        # Jetty style support
-                        # scalar array support {'attr1': [val1]}
-                        fn = [fn]
-                    else:
-                        # Jetty.NET style support (backward compatibility)
-                        # scalar array support [{'attr1': val1}]
-                        struct.array = True
+                    struct.array = True
 
             # store the sub-element python type (function) in the element dict
             if (e['name'] is not None and not alias) or e['ref']:
@@ -270,17 +258,20 @@ def process_element(elements, element_name, node, element_type, xsd_uri,
                 log.debug('complexContent/simpleType/element %s = %s' % (element_name, type_name))
                 # use None to point this is a complex element reference
                 struct.refers_to = fn
+
             if e is not None and e.get_local_name() == 'extension' and e.children():
                 # extend base element (if ComplexContent only!):
-                if isinstance(fn, Struct) and fn.refers_to:
-                    base_struct = fn.refers_to
-                else:
-                    # TODO: check if this actually works for SimpleContent
-                    base_struct = None
+                #if isinstance(fn, Struct) and fn.refers_to and isinstance(fn.refers_to, Struct):
+                #    base_struct = fn.refers_to
+                #else:
+                #    # TODO: check if this actually works for SimpleContent
+                #    base_struct = None
                 # extend base element:
+
+                struct.refers_to = fn
                 process_element(elements, element_name, e.children(),
                                 element_type, xsd_uri, dialect, namespace,
-                                qualified, struct=base_struct)
+                                qualified, struct=struct)
 
         # add the processed element to the main dictionary (if not extension):
         if new_struct:
@@ -299,27 +290,36 @@ def postprocess_element(elements, processed):
     processed.append(elements)
 
     for k, v in elements.items():
+        nv = v
+
         if isinstance(v, Struct):
-            if v != elements:  # TODO: fix recursive elements
-                try:
-                    postprocess_element(v, processed)
-                except RuntimeError as e:  # maximum recursion depth exceeded
-                    warnings.warn(unicode(e), RuntimeWarning)
+            postprocess_element(v, processed)
+
             if v.refers_to:  # extension base?
+
                 if isinstance(v.refers_to, dict):
+                    if isinstance(v.refers_to, Struct):
+                        postprocess_element(v.refers_to, processed)
+
                     extend_element(v, v.refers_to)
                     # clean the reference:
                     v.refers_to = None
+                    nv = v
                 else:  # "alias", just replace
                     ##log.debug('Replacing %s = %s' % (k, v.refers_to))
-                    elements[k] = v.refers_to
+                    nv = v.refers_to
+
             if v.array:
-                elements[k] = [v]  # convert arrays to python lists
-        if isinstance(v, list):
-            for n in v:  # recurse list
+                nv = [nv]  # convert arrays to python lists
+
+        if isinstance(nv, list):
+            for n in nv:
                 if isinstance(n, (Struct, list)):
-                    #if n != elements:  # TODO: fix recursive elements
                     postprocess_element(n, processed)
+
+        elements[k] = nv
+
+    return
 
 def extend_element(element, base):
     ''' Recursively extend the elemnet if it has an extension base.'''
@@ -549,6 +549,7 @@ Date = datetime.date
 Time = datetime.time
 duration = Alias(str, 'duration')
 any_uri = Alias(str, 'anyURI')
+token = Alias(str, 'token')
 
 # Define conversion function (python type): xml schema type
 TYPE_MAP = {
@@ -567,6 +568,7 @@ TYPE_MAP = {
     datetime.time: 'time',
     duration: 'duration',
     any_uri: 'anyURI',
+    token: 'token',
 }
 TYPE_MARSHAL_FN = {
     datetime.datetime: datetime_m,
@@ -588,6 +590,7 @@ REVERSE_TYPE_MAP = dict([(v, k) for k, v in TYPE_MAP.items()])
 
 REVERSE_TYPE_MAP.update({
     'base64Binary': str,
+    'hexBinary': str,
     'unsignedByte': byte,
     'unsignedInt': int,
     'unsignedLong': long,
@@ -680,27 +683,36 @@ class Struct(dict):
         return hash(self.key)
 
     def __str__(self):
-        return "%s" % dict.__str__(self)
+        return repr(self)
 
     def __repr__(self):
-        if not self.key: return str(self.keys())
-        s = '%s' % self.key[0]
-        if self.keys():
-            s += ' {'
-            for k, t in self.items():
-                is_list = False
-                if isinstance(t, list):
-                    is_list = True
-                    t = t[0]
-                if isinstance(t, type):
-                    t = t.__name__
-                    pass
-                elif isinstance(t, Alias):
-                    t = t.xml_type
-                elif isinstance(t, Struct):
-                    t = t.key[0]
-                if is_list:
-                    t = [t]
-                s += '%s: %s, ' % (k, t)
-            s = s[:-2]+'}'
-        return s
+        #if not self.key: return str(self.keys())
+        #s = '%s' % self.key[0]
+        #if self.keys():
+        #    s += ' {'
+        #    for k, t in self.items():
+        #        is_list = False
+        #        if isinstance(t, list):
+        #            is_list = True
+        #            t = t[0]
+        #        if isinstance(t, type):
+        #            t = t.__name__
+        #            pass
+        #        elif isinstance(t, Alias):
+        #            t = t.xml_type
+        #        elif isinstance(t, Struct):
+        #            t = t.key[0]
+        #        if is_list:
+        #            t = [t]
+        #        s += '%s: %s, ' % (k, t)
+        #    s = s[:-2]+'}'
+        #return s
+
+        out = '{key}{{{attrs}}}'.format(s=self, key=self.key[0] if self.key else '', attrs=', '.join('{}: {}'.format(k, v) for k,v in self.items() if v != self))
+        if self.refers_to is not None and self.refers_to != self:
+            out += '->{s.refers_to!r}'.format(s=self)
+    
+        if self.array:
+            out = '[{}]'.format(out)
+
+        return out
